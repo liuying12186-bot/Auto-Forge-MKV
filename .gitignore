@@ -42,3 +42,6 @@ _*.mkv
 build/
 dist/
 *.manifest
+
+# 本地测试包（大文件，不入库）
+_test_pack/

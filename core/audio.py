@@ -29,6 +29,7 @@ FLAC 的位深必须写成 s32（ffmpeg 侧），容器里才记成 24bit；
 from __future__ import annotations
 
 import logging
+import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -476,6 +477,48 @@ def _cleanup(path: str) -> None:
             log.debug("已清理: %s", path)
         except OSError as e:
             log.warning("清理失败 %s: %s", path, e)
+
+
+# ---------------------------------------------------------------- 起音检测
+# 2026/10/25 实测：外挂音轨和画面里的音乐不是同一版，尾部长度天然对不上，
+# 唯一稳定的锚点是「两边第一声」（人声/旋律起音）。所以按起音对齐，
+# 尾部多出来的部分直接截掉，而不是妄图两端同时对齐。
+_RE_SIL_START = re.compile(r"silence_start:\s*(-?[0-9.]+)")
+_RE_SIL_END = re.compile(r"silence_end:\s*(-?[0-9.]+)")
+
+
+def detect_onset(path, stream="0:a:0", noise="-50dB", min_silence=0.2,
+                 timeout=1800):
+    """返回第一声开始的秒数；开头没静音返回 0.0，检测失败返回 None。"""
+    cmd = [FFMPEG, "-nostdin", "-hide_banner", "-i", path,
+           "-map", stream,
+           "-af", "silencedetect=noise=%s:d=%s" % (noise, min_silence),
+           "-f", "null", "-"]
+    code, _, err = run(cmd, desc="起音检测", timeout=timeout)
+    if code != 0:
+        log.warning("起音检测失败（退出码 %s）: %s", code, (err or "").strip()[:200])
+        return None
+    text = err or ""
+    starts = [float(x) for x in _RE_SIL_START.findall(text)]
+    ends = [float(x) for x in _RE_SIL_END.findall(text)]
+    if not ends:
+        return 0.0                      # 全程有声
+    if not starts or starts[0] > 0.05:
+        return 0.0                      # 开头没有静音段
+    return ends[0]
+
+
+def auto_align_delay(video, ext_audio, video_stream="0:a:0", noise="-50dB",
+                     min_silence=0.2, timeout=1800):
+    """算出让两边第一声重合的 delay（毫秒）。
+
+    返回 (delay_ms, 画面侧起音, 音轨起音)；任一检测失败则 delay 归 0。
+    """
+    v = detect_onset(video, video_stream, noise, min_silence, timeout)
+    e = detect_onset(ext_audio, "0:a:0", noise, min_silence, timeout)
+    if v is None or e is None:
+        return 0, v, e
+    return int(round((v - e) * 1000.0)), v, e
 
 
 # ---------------------------------------------------------------- 自测

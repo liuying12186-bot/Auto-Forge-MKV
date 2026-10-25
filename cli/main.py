@@ -29,11 +29,13 @@ if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from core import __version__  # noqa: E402
-from core.audio import AudioSpec, build_audio_cmd, prepare_audio  # noqa: E402
+from core.audio import (  # noqa: E402
+    AudioSpec, auto_align_delay, build_audio_cmd, prepare_audio,
+)
 from core.batch import collect_sources, out_path_for, parse_exts  # noqa: E402
 from core.cut import build_cut_cmds, execute as cut_execute, plan_cut  # noqa: E402
 from core.mux import MuxSpec, build_mux_cmd, mux  # noqa: E402
-from core.probe import list_keyframes, load_or_probe  # noqa: E402
+from core.probe import list_keyframes, load_or_probe, probe_streams  # noqa: E402
 from core.util import (  # noqa: E402
     FFMPEG, MKVMERGE, ensure_parent, ensure_utf8_console, fmt_dur, human_size,
     init_tools, setup_logging,
@@ -101,6 +103,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                     help="外部音轨；不给则沿用源里的音轨")
     ap.add_argument("--delay", type=int, default=0,
                     help="音频延迟毫秒，正数=音频偏晚")
+    ap.add_argument("--auto-align", action="store_true",
+                    help="自动测两边第一声并算出 --delay（外挂音轨推荐）")
+    ap.add_argument("--no-fit", action="store_true",
+                    help="外挂音轨比画面长时不自动截到画面长度")
     ap.add_argument("--audio-mode", choices=["physical", "container"],
                     default="physical",
                     help="physical=adelay 填真静音（默认）；container=交给 mkvmerge --sync")
@@ -204,11 +210,52 @@ def forge(a: argparse.Namespace) -> RunReport:
     physical = a.audio_mode == "physical"
     # 音轨若取自源视频，就必须和画面切同一段窗口；外部音轨默认已对齐，不截
     same_source = a.audio is None
+
+    # ---- 外挂音轨：先按「第一声」对齐，再按画面长度截尾
+    if not same_source and a.auto_align:
+        d, v_on, e_on = auto_align_delay(src, a.audio)
+        if v_on is None or e_on is None:
+            log.warning("⚠️ 起音检测失败，沿用 --delay=%+dms", a.delay)
+        else:
+            log.info("🎯 自动对齐: 画面侧第一声 %.3fs | 外挂音轨 %.3fs → delay %+dms",
+                     v_on, e_on, d)
+            a.delay = d
+
+    trim_start = 0.0
+    trim_dur = 0.0
+    pad_tail = 0.0
+    if same_source:
+        # 音轨取自源视频，必须和画面切同一段窗口
+        if not plan.no_cut:
+            trim_start = plan.real_start
+            trim_dur = plan.duration
+    else:
+        # 外挂音轨和画面的长度天然对不上，两头都得管：
+        #   长了 → 拖出黑屏，截到画面长度
+        #   短了 → 播放器提前收场，补尾部静音撑到画面长度
+        try:
+            ext_dur = probe_streams(a.audio, require_video=False).duration
+        except RuntimeError:
+            ext_dur = 0.0
+        target = media.duration
+        if ext_dur > 0 and target > 0 and not a.no_fit:
+            if ext_dur > target + 0.001:
+                trim_dur = target
+                log.info("✂️ 外挂音轨 %.3fs > 画面 %.3fs，尾部截掉 %.3fs",
+                         ext_dur, target, ext_dur - target)
+            else:
+                room = target - ext_dur - (a.delay / 1000.0 if physical else 0.0)
+                if room > 0.001:
+                    pad_tail = room
+                    log.info("🩹 外挂音轨 %.3fs < 画面 %.3fs，尾部补静音 %.3fs",
+                             ext_dur, target, room)
+
     spec = AudioSpec(
         sample_rate=a.rate, bits=a.bits,
         delay_ms=a.delay if physical else 0,
-        trim_start=plan.real_start if (same_source and not plan.no_cut) else 0.0,
-        trim_dur=plan.duration if (same_source and not plan.no_cut) else 0.0,
+        trim_start=trim_start,
+        trim_dur=trim_dur,
+        pad_tail_sec=pad_tail,
     )
 
     if not media.a_codec and not a.audio:
