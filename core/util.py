@@ -120,6 +120,7 @@ def run_streamed(cmd: list[str], desc: str = "", timeout: int = 3600,
         p.wait(timeout=timeout)
     except subprocess.TimeoutExpired:
         p.kill()
+        p.wait()  # 收尸：否则子进程句柄泄漏，Windows 上会卡住后续 ffmpeg 调用
         return 124, "timeout"
 
     code = p.returncode or 0
@@ -169,12 +170,19 @@ def fmt_sec(sec: float, ms: bool = False) -> str:
 
 
 def fmt_dur(sec: float) -> str:
-    """秒 → HH:MM:SS.mmm，给人看。"""
+    """秒 → HH:MM:SS.mmm，给人看。
+
+    ★ 先把整段时长折成千分位整数再拆分，不能对秒个别做 f"{s:06.3f}"：
+      59.9999 秒会输出 "00:00:60.000"，7199.9999 秒会输出 "01:59:60.000"，
+      多出来的那一位 60 秒既不合法，也会把日志里的时间轴读歪。
+    """
     if sec is None or sec < 0:
         return "00:00:00.000"
-    h, rem = divmod(sec, 3600)
-    m, s = divmod(rem, 60)
-    return f"{int(h):02d}:{int(m):02d}:{s:06.3f}"
+    total_ms = int(round(sec * 1000))
+    h, rem = divmod(total_ms, 3_600_000)
+    m, rem = divmod(rem, 60_000)
+    s, ms = divmod(rem, 1000)
+    return f"{h:02d}:{m:02d}:{s:02d}.{ms:03d}"
 
 
 # ================================================================ 文件
