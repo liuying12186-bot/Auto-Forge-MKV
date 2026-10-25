@@ -18,7 +18,7 @@
 - [x] **Hi-Res 条件校验**：按「采样率 ≥ 48kHz 且 位深 ≥ 24bit」判定，采样率与位深均可配置。
 - [x] **一键封装**：`mkvmerge --no-audio` 剔除原音轨，合并无损音轨，成品回读轨道数校验。
 - [x] **端到端实测**：4K HEVC 源 → 55.8s 成品 204.6MB，1 视频 + 1 FLAC，总耗时 3.11s。
-- [ ] **批处理流水线**：遍历文件夹挂机跑（未实现）。
+- [x] **批处理流水线**：`--batch` 遍历文件夹逐个处理，默认不递归，加 `--recursive` 才进子目录；成品保留子目录结构，深层目录里同名的 `op.mkv` 不会互相覆盖；单个文件失败不拖累整批。
 - [ ] **AI 简介生成**：接 DeepSeek 自动写平台简介（未实现）。
 
 ## 技术栈
@@ -48,6 +48,12 @@ python cli/main.py "source.mkv" --start 3 --end 60 --delay 1130 --dry-run
 
 # 真跑（物理延迟，出成品）
 python cli/main.py "source.mkv" --start 3 --end 60 --delay 1130 --name "OP"
+
+# 整个文件夹批处理（不递归）
+python cli/main.py "D:/素材库" --batch --out "D:/成品"
+
+# 连子目录一起，只挑 mp4/mkv
+python cli/main.py "D:/素材库" --batch --recursive --ext mp4,mkv
 
 # 保留中间产物 / 忽略 probe 缓存
 python cli/main.py "source.mkv" --keep --refresh

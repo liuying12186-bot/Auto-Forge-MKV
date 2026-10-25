@@ -28,7 +28,9 @@ from pathlib import Path
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from core.__init__ import __version__  # noqa: E402
 from core.audio import AudioSpec, build_audio_cmd, prepare_audio  # noqa: E402
+from core.batch import collect_sources, out_path_for, parse_exts  # noqa: E402
 from core.cut import build_cut_cmds, execute as cut_execute, plan_cut  # noqa: E402
 from core.mux import MuxSpec, build_mux_cmd, mux  # noqa: E402
 from core.probe import list_keyframes, load_or_probe  # noqa: E402
@@ -49,6 +51,7 @@ class StageResult:
     ok: bool
     seconds: float = 0.0
     detail: str = ""
+    skipped: bool = False   # 跳过 ≠ 失败：dry-run 探测不到就标跳过
 
 
 @dataclass
@@ -60,15 +63,16 @@ class RunReport:
 
     @property
     def ok(self) -> bool:
-        return all(s.ok for s in self.stages)
+        return all(s.ok for s in self.stages if not s.skipped)
 
-    def add(self, name: str, ok: bool, seconds: float, detail: str = "") -> None:
-        self.stages.append(StageResult(name, ok, seconds, detail))
+    def add(self, name: str, ok: bool, seconds: float, detail: str = "",
+            skipped: bool = False) -> None:
+        self.stages.append(StageResult(name, ok, seconds, detail, skipped))
 
     def summary(self) -> str:
         lines = ["", "=" * 62, "📋 流水线汇总", "=" * 62]
         for s in self.stages:
-            mark = "✅" if s.ok else "❌"
+            mark = "⏭️" if s.skipped else ("✅" if s.ok else "❌")
             lines.append(f"{mark} {s.name:<14} {s.seconds:6.2f}s  {s.detail}")
         total = sum(s.seconds for s in self.stages)
         lines.append("-" * 62)
@@ -108,6 +112,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     ap.add_argument("--keep", action="store_true", help="保留中间产物")
     ap.add_argument("--refresh", action="store_true", help="忽略 probe 缓存")
     ap.add_argument("-q", "--quiet", action="store_true")
+    ap.add_argument("--version", action="version",
+                    version=f"Auto-Forge-MKV {__version__}")
+    ap.add_argument("--batch", action="store_true",
+                    help="把 src 当目录，逐个处理里面的视频")
+    ap.add_argument("--recursive", action="store_true",
+                    help="配合 --batch：连子目录一起")
+    ap.add_argument("--ext", default=None,
+                    help="配合 --batch：只处理这些扩展名，如 mp4,mkv（默认常见视频容器）")
     return ap.parse_args(argv)
 
 
@@ -125,6 +137,12 @@ def forge(a: argparse.Namespace) -> RunReport:
     try:
         media = load_or_probe(src, str(CACHE), refresh=a.refresh)
     except (RuntimeError, FileNotFoundError) as e:
+        if a.dry_run:
+            # dry-run 的目的只是给施工图；文件本身读不出来也算不上“失败”，
+            # 标成跳过，退出码仍然是 0，免得批量预览时满屏红。
+            report.add("probe", False, time.perf_counter() - t,
+                       "dry-run 跳过（读不出媒体信息）", skipped=True)
+            return report
         report.add("probe", False, time.perf_counter() - t, str(e)[:80])
         return report
     detail = (f"{media.width}x{media.height}@{media.fps:.3f} "
@@ -247,6 +265,57 @@ def forge(a: argparse.Namespace) -> RunReport:
     return report
 
 
+# ---------------------------------------------------------------- 批处理
+def run_batch(a: argparse.Namespace) -> int:
+    """把一个目录里的视频逐个跑一遍，单个失败不拖累其他。
+
+    退出码沿用单文件的约定：0 全成功，1 有失败，2 参数/目录问题。
+    """
+    root = Path(a.src)
+    if not root.is_dir():
+        log.error("❌ --batch 需要一个目录: %s", a.src)
+        return 2
+
+    files = collect_sources(root, parse_exts(a.ext), recursive=a.recursive)
+    if not files:
+        log.error("❌ 目录里没找到可处理的视频: %s", a.src)
+        return 2
+
+    out_dir = Path(a.out) if a.out else root / "_out"
+    log.info("📂 批处理 %d 个文件 → %s", len(files), out_dir)
+    if a.dry_run:
+        log.info("🧪 dry-run：只列清单，不执行")
+
+    done, failed = [], []
+    t0 = time.perf_counter()
+    for i, f in enumerate(files, 1):
+        rel = f.relative_to(root).as_posix()
+        log.info("—— [%d/%d] %s", i, len(files), rel)
+        sub = argparse.Namespace(**vars(a))  # 浅拷贝，别污染循环变量
+        sub.src = str(f)
+        sub.batch = False
+        sub.out = str(out_path_for(f, root, out_dir))
+        try:
+            report = forge(sub)
+        except Exception as e:  # 一个文件炸了不该让整批停住
+            log.error("❌ %s 异常: %s", rel, e)
+            failed.append((rel, "异常"))
+            continue
+        if report.ok:
+            done.append(rel)
+        else:
+            why = next((s.detail for s in report.stages if not s.ok), "失败")
+            failed.append((rel, why))
+
+    cost = time.perf_counter() - t0
+    log.info("========== 批处理结束 ==========")
+    log.info("✅ 成功 %d / ❌ 失败 %d / ⏱ %.2fs", len(done), len(failed), cost)
+    if failed:
+        for rel, why in failed:
+            log.warning("  · %s —— %s", rel, why)
+    return 0 if not failed else 1
+
+
 # ---------------------------------------------------------------- 入口
 def main(argv: list[str] | None = None) -> int:
     a = parse_args(argv)
@@ -261,6 +330,9 @@ def main(argv: list[str] | None = None) -> int:
         log.error("❌ 找不到 mkvmerge（装了 MKVToolNix 才有）")
         return 3
 
+    if a.batch:
+        return run_batch(a)
+
     if not Path(a.src).is_file():
         log.error("❌ 源文件不存在: %s", a.src)
         return 2
@@ -274,7 +346,7 @@ def main(argv: list[str] | None = None) -> int:
 
 
 # ---------------------------------------------------------------- 双击友好
-def _pause(msg: str = "按回车键退出…") -> None:
+def _pause(msg: str = "按回车键关闭窗口…") -> None:
     """双击 exe 时，控制台窗口会跟着进程一起消失，提示一闪而过。
 
     所以冻结成 exe 之后，退出前停一下让人看清结果；
@@ -302,6 +374,10 @@ BANNER = """Auto-Forge-MKV  ·  视频无损切段 + 音轨重封装
   AutoForgeMKV.exe "D:\\片子.mp4" --start 35 --end 120
   AutoForgeMKV.exe "D:\\片子.mp4" --audio "D:\\音频.flac" --delay -240
 
+整个文件夹一起处理：
+  AutoForgeMKV.exe "D:\\素材库" --batch
+  AutoForgeMKV.exe "D:\\素材库" --batch --recursive --out "D:\\成品"
+
 查看全部参数：AutoForgeMKV.exe --help
 """
 
@@ -312,20 +388,23 @@ def _cli() -> int:
     argv = sys.argv[1:]
     if not argv:
         print(BANNER)
-        return 0
+        _pause()
+        return None
     try:
         return main(argv)
     except KeyboardInterrupt:
         print("\n已中断")
         return 130
-    except SystemExit as e:  # argparse --help / 参数错误都从这里出去
+    except SystemExit as e:  # argparse --help / --version / 参数错误都从这里出去
         return int(e.code or 0)
 
 
 if __name__ == "__main__":
     _code = _cli()
+    if _code is None:  # 只打印了 banner，提示已经自己停过了
+        sys.exit(0)
     if _code == 0:
-        _pause("完成，按回车键退出…")
+        _pause("完成，按回车键关闭窗口…")
     else:
-        _pause(f"出错了（退出码 {_code}），按回车键退出…")
+        _pause(f"出错了（退出码 {_code}），按回车键关闭窗口…")
     sys.exit(_code)
