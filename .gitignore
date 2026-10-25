@@ -1,0 +1,40 @@
+# ---- 媒体文件，绝不进仓库 ----
+*.mkv
+*.mp4
+*.flv
+*.webm
+*.avi
+*.ts
+*.m2ts
+*.mov
+*.wav
+*.flac
+*.mka
+*.ass
+*.srt
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+.env
+*.log
+
+# ---- 编辑器 / 系统 ----
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ---- 本项目临时产物 ----
+_out/
+_temp/
+*.cut.mkv
+*.forge.mkv
+_*.mkv
+.forge_cache/ 
+*.probe.json 
