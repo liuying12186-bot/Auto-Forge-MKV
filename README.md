@@ -129,4 +129,4 @@ Auto-Forge-MKV/
 
 ## 许可
 
-待定。
+MIT License © 2026 liuying12186-bot，详见 [LICENSE](LICENSE)。
