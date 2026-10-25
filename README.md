@@ -9,70 +9,90 @@
 
 | 层 | 文件 | 状态 |
 |---|---|---|
-| probe 探测 | `core/probe.py` | ✅ 已实测（4K HEVC 60fps，2.3s 扫完 109s 素材） |
-| cut 切割 | `core/cut.py` | ✅ 已实测（`-i` 前置模式时长误差 0.08s） |
-| audio 音频 | `core/audio.py` | ⏳ 待写（延迟 / 重采样 / FLAC 锁定） |
-| mux 封装 | `core/mux.py` | ⏳ 待写（mkvmerge 合并、剔垃圾轨） |
-| cli 入口 | `cli/main.py` | ✅ `probe` / `cut` 可用 |
+| util 基础设施 | `core/util.py` | ✅ 进程调用 / 数值解析 / 工具定位 |
+| probe 探测 | `core/probe.py` | ✅ 实测（packet 扫描 0.60s vs frame 解码 1.84s，结果一致） |
+| cut 切割 | `core/cut.py` | ✅ 实测（两段式，55.866s 首包 pts 0.033） |
+| audio 音频 | `core/audio.py` | ✅ 实测（adelay 真静音 + 尾部裁回，静音段实测 1.130s） |
+| mux 封装 | `core/mux.py` | ✅ 实测（1 视频 + 1 FLAC，轨道数回读校验） |
+| cli 入口 | `cli/main.py` | ✅ 端到端跑通（`--dry-run` / `--keep`） |
+
+首次端到端成品（2026/10/25）：
+
+```
+源     恋ひ恋ふ縁 (Game Size).mkv   3840x2160 HEVC 60fps / FLAC 48kHz 24bit
+请求   3.000s → 60.000s，+1130ms 音频延迟
+落点   4.167s → 60.000s（55.833s，头误差 +1.167s 受关键帧限制）
+成品   1 视频 + 1 FLAC | 204.6MB | 总耗时 3.11s
+```
 
 ## 快速开始
 
 ```bash
-# 只看参数与关键帧分布，不动文件
-python cli/main.py probe "source.mkv"
+# 全流程 dry-run：只打印命令，不执行
+python cli/main.py "source.mkv" --start 3 --end 60 --delay 1130 --dry-run
 
-# 规划切割（dry-run，打印施工图与关键帧偏移）
-python cli/main.py cut "source.mkv" --start 3 --end 100
+# 真跑
+python cli/main.py "source.mkv" --start 3 --end 60 --delay 1130 --name "OP"
 
-# 真的切
-python cli/main.py cut "source.mkv" --start 3 --end 100 --run
+# 单层调试
+python core/probe.py "source.mkv"
+python core/cut.py  "source.mkv" --start 3 --end 25 --run
+python core/audio.py "source.mkv" --delay 1130 --run
+python core/mux.py  video.mp4 audio.flac --out out.mkv --run
+
+# 测试
+python -m unittest discover -s tests -v
 ```
 
 ## 核心设计取舍
 
 ### 1. 无损切割只能落在关键帧
+
 `ffmpeg -c copy` 是无损的，但它只能在 I 帧起头。实测素材 109.4 秒里
 只有 29 个关键帧，间隔 0.833s ~ 4.167s，这就是切割精度的天花板。
-本工具不会偷偷切错，而是把「请求区间」与「实际落点」并排打出来，
-偏移多少明明白白告诉使用者。
+本工具不会偷偷切错，而是把「请求区间」与「实际落点」并排打出来。
 
-### 2. `-ss` 必须放在 `-i` 之后
-2026/10/25 实测（4K/60fps HEVC）：
+### 2. `-ss` 和 `-t` 必须分成两条命令
 
-| 写法 | 输出时长 | 结论 |
+2026/10/25 实测（120fps，GOP=10.042s）：
+
+| 写法 | 输出 | 判定 |
 |---|---|---|
-| `-ss 4.167 -i SRC -t 94.166` | 98.416s | ✗ 漂移 4.25s |
-| `-i SRC -ss 4.167 -t 94.166` | 94.249s | ✓ |
-| `-i SRC -ss 4.167 -to 98.333` | 94.249s | ✓ |
-| `-ss 4.167 -i SRC -to 98.333` | 102.583s | ✗ |
+| `-i SRC -ss 10.042 -t 5` | 653 字节空文件，退出码 0 | ❌ 完全静默 |
+| `-ss 10.042 -i SRC -t 5` | 15.100s | ❌ 多出一个 GOP |
+| 两段式 | 5.059s | ✅ |
 
-输入侧 seek 与输出侧 `-t/-to` 混用会把 MKV 时间基准搞乱。
-安全做法：`-i` 在前，`-ss` 在后，代价只是多解一小段。
+所以固定两段：先切头建立新基准，再在新基准上截时长。
+`tests/test_cut.py` 有一条断言专门盯着「同一条命令不许同时出现 `-ss` 和 `-t`」。
 
-### 3. 「填充静音」与「不重编码」互斥
-想在音频前面补 1390ms 静音，本质是改音频数据，必然重编码。
-两条路：
-- **改时间戳**：`mkvmerge --sync 0:1390`，零重编码，但部分播放器/平台不认偏移。
-- **PCM 中转**：解码成 PCM 再封回 FLAC，FLAC→FLAC 无损，代价几十秒。
+### 3. 延迟只能在一处生效
+
+| 方案 | 实现位置 | 优点 | 代价 |
+|---|---|---|---|
+| A 物理延迟 | `audio.py` 的 `adelay` | 真静音样本，转码也丢不掉 | 整轨重编码 |
+| B 容器偏移 | `mux.py` 的 `--sync` | 零耗时零损失 | 部分转码服务会丢偏移 |
+
+默认走 A（`--audio-mode physical`）。两者同时用会把延迟叠成 2260ms，
+所以 `AudioSpec` 和 `MuxSpec` 各有一条断言，构造时直接抛 `ValueError`。
 
 ### 4. 升采样不等于提升音质
-44.1kHz 升到 48kHz 只是满足平台标签要求，不会让声音变好。
-本工具会如实告知这一点，不假装是「增强」。
+
+44.1kHz 升到 48kHz 只是满足平台 Hi-Res 标签要求，不会让声音变好。
+本工具会如实告知，不假装是「增强」。
 
 ## 依赖
 
 - Python 3.10+
-- FFmpeg / ffprobe（已在 PATH）
-- MKVToolNix（`mux` 层需要，尚未接线）
+- FFmpeg / ffprobe（PATH 里能找到即可）
+- MKVToolNix（`mux` 层需要；会自动探测 `C:\Program Files\MKVToolNix`）
 
 ## 目录
 
 ```
 Auto-Forge-MKV/
-├── cli/           命令行入口
-├── core/          probe / cut / audio / mux
-├── docs/          技术笔记与踩坑记录
-├── examples/      示例配置与批处理脚本
+├── cli/           命令行入口（单文件流水线）
+├── core/          util / probe / cut / audio / mux
+├── docs/          技术笔记与踩坑记录（pitfalls.md）
 └── tests/         测试
 ```
 
