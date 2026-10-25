@@ -28,7 +28,7 @@ from pathlib import Path
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from core.__init__ import __version__  # noqa: E402
+from core import __version__  # noqa: E402
 from core.audio import AudioSpec, build_audio_cmd, prepare_audio  # noqa: E402
 from core.batch import collect_sources, out_path_for, parse_exts  # noqa: E402
 from core.cut import build_cut_cmds, execute as cut_execute, plan_cut  # noqa: E402
@@ -172,14 +172,23 @@ def forge(a: argparse.Namespace) -> RunReport:
                     "需要先转 CFR 再切", media.fps, media.avg_fps)
 
     if not a.quiet:
-        print(f"\n✂️ 请求 {a.start:.3f}s → "
-              f"{a.end if a.end else '片尾'}，"
-              f"吸附到 {plan.real_start:.3f}s → {plan.real_end:.3f}s "
-              f"（{plan.duration:.3f}s）")
-        for i, c in enumerate(plan.cmds, 1):
-            print(f"   第{i}段: {' '.join(c)}")
+        if plan.no_cut:
+            print(f"\n✂️ 请求 {a.start:.3f}s → "
+                  f"{a.end if a.end else '片尾'}，已覆盖整段（{plan.duration:.3f}s），"
+                  f"跳过切割，画面直接透传源")
+        else:
+            print(f"\n✂️ 请求 {a.start:.3f}s → "
+                  f"{a.end if a.end else '片尾'}，"
+                  f"吸附到 {plan.real_start:.3f}s → {plan.real_end:.3f}s "
+                  f"（{plan.duration:.3f}s）")
+            for i, c in enumerate(plan.cmds, 1):
+                print(f"   第{i}段: {' '.join(c)}")
 
-    if a.dry_run:
+    if plan.no_cut:
+        # 复用的“不切”路径：成品画面就是源文件本身
+        report.add("cut", True, 0.0, "整段无需切割（直接透传源画面）")
+        report.artifacts["cut"] = src
+    elif a.dry_run:
         report.add("cut", True, 0.0, "dry-run 未执行")
     elif cut_execute(plan, keep_tmp=not a.keep):
         report.add("cut", True, time.perf_counter() - t,
@@ -198,8 +207,8 @@ def forge(a: argparse.Namespace) -> RunReport:
     spec = AudioSpec(
         sample_rate=a.rate, bits=a.bits,
         delay_ms=a.delay if physical else 0,
-        trim_start=plan.real_start if same_source else 0.0,
-        trim_dur=plan.duration if same_source else 0.0,
+        trim_start=plan.real_start if (same_source and not plan.no_cut) else 0.0,
+        trim_dur=plan.duration if (same_source and not plan.no_cut) else 0.0,
     )
 
     if not media.a_codec and not a.audio:
@@ -234,7 +243,12 @@ def forge(a: argparse.Namespace) -> RunReport:
         language=a.lang, track_name=a.name,
         fps_declare=None,          # VFR 已在上一步警告，不在这里偷偷声明
     )
-    mux_video = plan.out if not a.dry_run else str(CACHE / "cut.mp4")
+    if plan.no_cut:
+        mux_video = src
+    elif a.dry_run:
+        mux_video = str(CACHE / "cut.mp4")
+    else:
+        mux_video = plan.out
     mux_audio = audio_out if not a.dry_run else audio_out
 
     if not a.quiet:
@@ -257,6 +271,8 @@ def forge(a: argparse.Namespace) -> RunReport:
     if not a.keep:
         for f in (str(CACHE / "audio.flac"), mux_video):
             p = Path(f)
+            if p == Path(src):
+                continue          # 不切的那条路，mux_video 就是源文件，别自尽
             if p.is_file() and p != Path(out):
                 try:
                     p.unlink()
@@ -396,7 +412,10 @@ def _cli() -> int:
         print("\n已中断")
         return 130
     except SystemExit as e:  # argparse --help / --version / 参数错误都从这里出去
-        return int(e.code or 0)
+        code = int(e.code or 0)
+        # 0 是 --help / --version 这类“看完就走”，别再追一句按回车；
+        # 非 0 才是参数写错了，那个值得停一下让人看清。
+        return None if code == 0 else code
 
 
 if __name__ == "__main__":

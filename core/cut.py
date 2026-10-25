@@ -82,6 +82,7 @@ class CutPlan:
     keyframes: list[float] = field(default_factory=list)
     cmds: list[list[str]] = field(default_factory=list)   # 两段命令
     tmp: str = ""                          # 第一段的中间产物
+    no_cut: bool = False                   # True = 整段不切，直接用源
 
     @property
     def start_offset(self) -> float:
@@ -219,13 +220,48 @@ def plan_cut(
     # 终点吸附：取 <= req_end 的最后一个关键帧（尾切用 before）
     real_end = pick_cutpoint(keyframes, req_end, side="before")
 
-    if real_start is None or real_end is None or real_end <= real_start:
+    if real_start is None or real_end is None:
         log.error("吸附后区间为空：可能切得太短（短于一个 GOP）。")
         return None
+
+    if real_end <= real_start:
+        # ★ 短片段陷阱：整段视频只有零星几个关键帧时（典型是十几秒的录屏、
+        #   浏览器捕获、手机快剪），尾切会吸附到和头切同一个关键帧，
+        #   区间自己把自己挤没了，整段视频直接处理不了。
+        #   这时候放弃尾部的关键帧吸附，改用请求的终点 —— 代价是最后那个
+        #   GOP 会在终点处被截断（-c copy 丢包即可，不解码也不重编码，
+        #   画面不变，只是末尾帧不完整），但至少能出成品。
+        log.warning("⚠️ 尾部没有可用关键帧，终点不再吸附（末段 GOP 会在 %.3fs 截断）",
+                    req_end)
+        real_end = min(req_end, total)
+        if real_end <= real_start:
+            log.error("吸附后区间仍为空：请求区间 %.3fs~%.3fs 太短。",
+                      start, req_end)
+            return None
 
     if real_end - real_start < MIN_DURATION:
         log.error("吸附后只剩 %.3fs，短于 %.2fs 下限。", real_end - real_start, MIN_DURATION)
         return None
+
+    # ★ 整段不切就别切：请求区间已经覆盖全片时（典型是“只换音轨、不动画面”，
+    #   或者零参数的批处理），再走一遍 -ss/-t 只会平添风险。
+    #   实测浏览器/游戏录屏这类短片段整个只有 1 个关键帧，
+    #   -i SRC -ss 0.051533 会静默产出 796 字节的空壳（退出码 0），
+    #   而完全不 seek 则能正常拿到 525KB。既然不需要切，就别碰画面。
+    kf_first = keyframes[0]
+    if start <= kf_first + 0.05 and req_end >= total - 0.05:
+        log.info("✂️ 请求区间已覆盖整段，跳过切割直接透传源画面")
+
+        if out is None:
+            base, ext = os.path.splitext(src)
+            out = f"{base}_cut{ext or '.mkv'}"
+
+        return CutPlan(
+            src=src, out=out,
+            req_start=start, req_end=req_end if end else 0.0,
+            real_start=0.0, real_end=total,
+            keyframes=keyframes, cmds=[], tmp="", no_cut=True,
+        )
 
     if out is None:
         base, ext = os.path.splitext(src)
