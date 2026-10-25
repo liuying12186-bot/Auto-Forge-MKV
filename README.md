@@ -28,6 +28,18 @@
 - MKVToolNix（封装引擎）
 - （计划）DeepSeek API：直接用 `openai` SDK，`base_url="https://api.deepseek.com"`、`model="deepseek-chat"`，无需自建 HTTP 层
 
+## 下载即用（Windows）
+
+不想装 Python 的话，直接去 [Releases](https://github.com/liuying12186-bot/Auto-Forge-MKV/releases/latest)
+下 `AutoForgeMKV.exe`，单文件，双击即可。
+
+- 双击（无参数）：显示一屏用法说明，停住等回车，不会闪退
+- 把视频文件拖到 exe 图标上：用默认参数直接开跑
+- 想指定参数：在该文件夹地址栏输入 `cmd` 回车，或用 PowerShell 运行
+
+exe **不含** ffmpeg / ffprobe / mkvmerge，运行时从 PATH 与 MKVToolNix 默认安装位置查找。
+这三个工具加起来上百 MB，塞进 exe 每次启动都要解包，反而更慢。
+
 ## 快速开始
 
 ```bash

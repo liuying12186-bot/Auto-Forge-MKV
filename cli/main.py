@@ -33,8 +33,8 @@ from core.cut import build_cut_cmds, execute as cut_execute, plan_cut  # noqa: E
 from core.mux import MuxSpec, build_mux_cmd, mux  # noqa: E402
 from core.probe import list_keyframes, load_or_probe  # noqa: E402
 from core.util import (  # noqa: E402
-    FFMPEG, MKVMERGE, ensure_parent, fmt_dur, human_size, init_tools,
-    setup_logging,
+    FFMPEG, MKVMERGE, ensure_parent, ensure_utf8_console, fmt_dur, human_size,
+    init_tools, setup_logging,
 )
 
 log = logging.getLogger("forge")
@@ -273,5 +273,59 @@ def main(argv: list[str] | None = None) -> int:
     return 0 if report.ok else 1
 
 
+# ---------------------------------------------------------------- 双击友好
+def _pause(msg: str = "按回车键退出…") -> None:
+    """双击 exe 时，控制台窗口会跟着进程一起消失，提示一闪而过。
+
+    所以冻结成 exe 之后，退出前停一下让人看清结果；
+    被管道或脚本调用时 stdin 不是终端，直接跳过，不拖慢自动化。
+    """
+    if not getattr(sys, "frozen", False):
+        return
+    try:
+        ensure_utf8_console()
+        if not sys.stdin or not sys.stdin.isatty():
+            return
+        input(msg)
+    except (EOFError, KeyboardInterrupt, OSError):
+        pass
+
+
+BANNER = """Auto-Forge-MKV  ·  视频无损切段 + 音轨重封装
+
+直接把视频文件拖到本程序图标上，就会用默认参数开始处理。
+也可以用命令行指定参数：
+
+  AutoForgeMKV.exe <源视频> [--start 秒] [--end 秒]
+
+常用示例：
+  AutoForgeMKV.exe "D:\\片子.mp4" --start 35 --end 120
+  AutoForgeMKV.exe "D:\\片子.mp4" --audio "D:\\音频.flac" --delay -240
+
+查看全部参数：AutoForgeMKV.exe --help
+"""
+
+
+def _cli() -> int:
+    """真正的入口：没有任何参数时给一屏说明，而不是甩出 argparse 报错。"""
+    ensure_utf8_console()
+    argv = sys.argv[1:]
+    if not argv:
+        print(BANNER)
+        return 0
+    try:
+        return main(argv)
+    except KeyboardInterrupt:
+        print("\n已中断")
+        return 130
+    except SystemExit as e:  # argparse --help / 参数错误都从这里出去
+        return int(e.code or 0)
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    _code = _cli()
+    if _code == 0:
+        _pause("完成，按回车键退出…")
+    else:
+        _pause(f"出错了（退出码 {_code}），按回车键退出…")
+    sys.exit(_code)

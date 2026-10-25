@@ -221,13 +221,15 @@ def mask_secret(s: str | None) -> str:
     return f"{s[:6]}…{s[-4:]}" if len(s) > 12 else "***"
 
 
-def setup_logging(level: int = logging.INFO, quiet: bool = False) -> None:
-    """统一日志格式；Windows 控制台强制 UTF-8，避免中文/emoji 炸成乱码。
+def ensure_utf8_console() -> None:
+    """让中文在 Windows 控制台里活下来。
 
     ★ 只把 Python 侧的编码改成 UTF-8 并不够：
       控制台自己的代码页还是 936，读 UTF-8 字节就会显示成
       「鉂?婧愭枃浠朵笉瀛樺湪」这种乱码。
       所以冻结成 exe 时要顺手把控制台代码页也切到 65001。
+    ★ 输出被重定向到文件/管道时同理，否则写进去的是 GBK 字节，
+      另一头按 UTF-8 读就炸。所以这一步要尽早做，别等 logging 初始化。
     """
     if sys.platform == "win32" and getattr(sys, "frozen", False):
         try:
@@ -237,11 +239,16 @@ def setup_logging(level: int = logging.INFO, quiet: bool = False) -> None:
             ctypes.windll.kernel32.SetConsoleCP(65001)
         except Exception:
             pass
-    try:
-        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
-    except Exception:
-        pass
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
+
+def setup_logging(level: int = logging.INFO, quiet: bool = False) -> None:
+    """统一日志格式；先在 Windows 下把编码收拾干净，再挂 handler。"""
+    ensure_utf8_console()
     logging.basicConfig(
         level=(logging.WARNING if quiet else level),
         format="%(levelname)s %(message)s",
@@ -256,6 +263,7 @@ def plain_name(path: str) -> str:
 __all__ = [
     "FFMPEG", "FFPROBE", "MKVMERGE", "MKVEXTRACT",
     "find_tool", "init_tools", "have",
+    "ensure_utf8_console", "setup_logging",
     "run", "run_streamed",
     "to_float", "to_int", "parse_fps", "fmt_sec", "fmt_dur",
     "ensure_parent", "cleanup", "human_size", "mask_secret",

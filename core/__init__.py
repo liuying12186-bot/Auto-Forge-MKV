@@ -21,4 +21,4 @@ __all__ = [
     "CutPlan", "build_cut_cmd", "execute", "plan_cut",
 ]
 
-__version__ = "0.1.0"
+__version__ = "0.1.2"
