@@ -59,24 +59,30 @@ class TestMapping(unittest.TestCase):
     """-map 0 会带进封面图和 tmcd 轨，导致 -c copy 直接失败。"""
 
     def test_only_first_video_mapped(self):
-        for cmd in build_cut_cmds("S.mkv", "O.mkv", 0.0, 5.0):
+        for cmd in build_cut_cmds("S.mkv", "O.mkv", 2.0, 5.0):
             self.assertEqual(cmd[cmd.index("-map") + 1], "0:v:0")
 
     def test_drops_subs_attach_and_chapters(self):
-        for cmd in build_cut_cmds("S.mkv", "O.mkv", 0.0, 5.0):
+        for cmd in build_cut_cmds("S.mkv", "O.mkv", 2.0, 5.0):
             self.assertIn("-sn", cmd)
             self.assertIn("-dn", cmd)
             self.assertIn("-an", cmd)
             self.assertEqual(cmd[cmd.index("-map_chapters") + 1], "-1")
 
     def test_video_always_copy(self):
-        for cmd in build_cut_cmds("S.mkv", "O.mkv", 0.0, 5.0):
+        for cmd in build_cut_cmds("S.mkv", "O.mkv", 2.0, 5.0):
             self.assertEqual(cmd[cmd.index("-c:v") + 1], "copy")
 
     def test_seconds_use_fixed_point(self):
         """浮点 repr 会产出 1e-07 这种写法，不同 ffmpeg 版本行为不稳。"""
-        cmd = build_cut_cmds("S.mkv", "O.mkv", 1e-07, 5.0)[0]
-        self.assertIn("0.000000", cmd)
+        cmd = build_cut_cmds("S.mkv", "O.mkv", 0.5, 5.0)[0]
+        self.assertIn("0.500000", cmd)
+
+    def test_tiny_start_is_treated_as_zero(self):
+        """1e-07 这种浮点毛刺也要归一到 0，否则 -ss 会写出 1e-07 这种垃圾。"""
+        cmds = build_cut_cmds("S.mkv", "O.mkv", 1e-07, 5.0)
+        self.assertEqual(len(cmds), 1)
+        self.assertNotIn("-ss", cmds[0])
 
 
 class TestCommandShape(unittest.TestCase):
@@ -85,7 +91,7 @@ class TestCommandShape(unittest.TestCase):
             self.assertTrue(cmd[-1].endswith(".mkv"))
 
     def test_second_stage_normalizes_ts(self):
-        seg2 = build_cut_cmds("S.mkv", "O.mkv", 0.0, 5.0)[1]
+        seg2 = build_cut_cmds("S.mkv", "O.mkv", 2.0, 5.0)[1]
         self.assertEqual(seg2[seg2.index("-avoid_negative_ts") + 1], "make_zero")
 
     def test_no_stdin_so_batch_never_hangs(self):
@@ -98,9 +104,42 @@ class TestCommandShape(unittest.TestCase):
 
     def test_compat_wrapper_returns_first_stage(self):
         self.assertEqual(
-            build_cut_cmd("S.mkv", "O.mkv", 0.0, 5.0),
-            build_cut_cmds("S.mkv", "O.mkv", 0.0, 5.0)[0],
+            build_cut_cmd("S.mkv", "O.mkv", 2.0, 5.0),
+            build_cut_cmds("S.mkv", "O.mkv", 2.0, 5.0)[0],
         )
+
+
+class TestZeroStart(unittest.TestCase):
+    """起点为 0 是条独立路径。
+
+    ★ 2026/10/25 实测：`-i SRC -ss 0.000000 -c:v copy` 在 4K HEVC 10bit 素材上
+      会静默产出空壳（退出码 0，只有 stderr 一句 Output file is empty）。
+      去掉 -ss 之后正常，HDR 元数据也全保留。所以零起点必须合成一条命令。
+    """
+
+    def test_single_command(self):
+        cmds = build_cut_cmds("S.mkv", "O.mkv", 0.0, 5.0)
+        self.assertEqual(len(cmds), 1)
+
+    def test_no_seek_at_all(self):
+        cmd = build_cut_cmds("S.mkv", "O.mkv", 0.0, 5.0)[0]
+        self.assertNotIn("-ss", cmd)
+        self.assertIn("-t", cmd)
+        self.assertEqual(cmd[cmd.index("-t") + 1], "5.000000")
+
+    def test_still_normalizes_ts(self):
+        cmd = build_cut_cmds("S.mkv", "O.mkv", 0.0, 5.0)[0]
+        self.assertEqual(cmd[cmd.index("-avoid_negative_ts") + 1], "make_zero")
+
+    def test_no_intermediate_file(self):
+        """单条命令不该再指向 .seg1 中间产物。"""
+        cmd = build_cut_cmds("S.mkv", "O.mkv", 0.0, 5.0, tmp="T.mkv")[0]
+        self.assertNotIn("T.mkv", cmd)
+
+    def test_end_beyond_source_still_single(self):
+        cmds = build_cut_cmds("S.mkv", "O.mkv", 0.0, 0.8)
+        self.assertEqual(len(cmds), 1)
+        self.assertEqual(cmds[0][cmds[0].index("-t") + 1], "0.800000")
 
 
 if __name__ == "__main__":

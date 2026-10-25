@@ -148,6 +148,9 @@ def build_cut_cmds(
     第 1 段：只切头。`-i SRC -ss START`，不加 -t。
     第 2 段：在新基准上截时长。`-i TMP -t DUR`。
 
+    ★ start≈0 时特殊处理：只出一条命令 `-i SRC -t DUR`。
+      因为 `-ss 0` 会让 -c copy 产出空壳（见下方说明）。
+
     accurate=False 时改用输入侧 -ss（快，但结尾会多出一个 GOP，
     只适合生成预览；实测这份素材会多吃 10.042s）。
     """
@@ -160,6 +163,20 @@ def build_cut_cmds(
         # 中间产物放在输出旁边而非源目录，避免污染片库根目录
         out_p = Path(out)
         tmp = str(out_p.with_name(f".{out_p.stem}.seg1.mkv"))
+
+    # ★ 起点为 0 时绝不能带 -ss：实测 `-i SRC -ss 0.000000 -c:v copy`
+    #   会静默产出空壳（退出码 0，stderr 才有一句 Output file is empty）。
+    #   4K HEVC / 10bit / VFR 这类素材上特别容易撞，因为第一个关键帧
+    #   就在 0 附近，头切吸附之后 start 正好是 0.000000。
+    #   不带 -ss 时 ffmpeg 走的是「整条读、按需写」，反而稳，且 HDR
+    #   的 colour_primaries / transfer / mastering display 全部原样保留。
+    #   所以起点在 0 附近就直接跳过第一段，合成一条命令。
+    if start <= 1e-6:
+        one = [FFMPEG, "-nostdin", "-y", "-hide_banner", "-loglevel", "error",
+               "-i", src, "-t", f"{dur:.6f}"]
+        one += _out_opts(["-avoid_negative_ts", "make_zero"])
+        one += [out]
+        return [one]
 
     seg1 = [FFMPEG, "-nostdin", "-y", "-hide_banner", "-loglevel", "error"]
     if accurate:
